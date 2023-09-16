@@ -1,2 +1,4 @@
-from .cfapi import CloudflareAPI
-from .__main__ import main
+
+def main():
+    from .cli import CFDDNS
+    CFDDNS().execute()
