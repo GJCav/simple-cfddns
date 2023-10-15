@@ -59,6 +59,9 @@ class CFDDNS:
         # all services
         services_parser = action_parser.add_parser("services", help="list all services")
         
+        # addr
+        addr_parser = action_parser.add_parser("addr", help="show the ip address that will be used to update record")
+        
         args = parser.parse_args()
         self.args = args
 
@@ -74,6 +77,8 @@ class CFDDNS:
             self.uninstall()
         elif args.action == "services":
             self.services()
+        elif args.action == "addr":
+            self.addr()
 
     def _check_api_args(self):
         args = self.args
@@ -276,6 +281,26 @@ class CFDDNS:
         print(f"Found {len(services)} services:")
         for service in services:
             print(f"  {service}")
+    
+    def addr(self):
+        """
+        show the ip address that will be used to update record
+        """
+        method = getattr(iptools, self.args.method, None)
+        if method is None:
+            print(f"Method {self.args.method} not found")
+            sys.exit(1)
+
+        addrs = method()
+        if isinstance(addrs, str):
+            addrs = [addrs]
+
+        if len(addrs) == 0:
+            print("No ip address found")
+            sys.exit(0)
+    
+        for addr in addrs:
+            print(addr)
 
 def main():
     CFDDNS().execute()
