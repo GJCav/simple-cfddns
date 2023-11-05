@@ -1,6 +1,7 @@
 import socket as S
 import requests
 
+TIMEOUT = 3
 
 class CloudflareAPI:
     def __init__(self, ZONE_ID, TOKEN, ttl = 60) -> None:
@@ -20,7 +21,8 @@ class CloudflareAPI:
             params = params,
             headers={
                 "Authorization": "Bearer " + TOKEN
-            }
+            },
+            timeout=TIMEOUT
         )
 
         if res.status_code == 200:
@@ -47,7 +49,8 @@ class CloudflareAPI:
                 "name": name,
                 "content": content,
                 "ttl": ttl
-            }
+            },
+            timeout=TIMEOUT
         )
 
         if res.status_code != 200:
@@ -73,7 +76,8 @@ class CloudflareAPI:
                 "name": name,
                 "content": content,
                 "ttl": ttl
-            }
+            },
+            timeout=TIMEOUT
         )
 
         if res.status_code != 200:
@@ -92,7 +96,8 @@ class CloudflareAPI:
         
         res = requests.delete(
             f"https://api.cloudflare.com/client/v4/zones/{ZONE_ID}/dns_records/{record_id}",
-            headers={ "Authorization": "Bearer " + TOKEN }
+            headers={ "Authorization": "Bearer " + TOKEN },
+            timeout=TIMEOUT
         )
 
         if res.status_code != 200:
