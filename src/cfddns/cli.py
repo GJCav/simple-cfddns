@@ -3,27 +3,11 @@ from . import iptools
 from .cfapi import CloudflareAPI
 import json
 import os
+import sys
 import os.path
 import re as regex
 import time
 import datetime
-
-SERVICE_TEMPLATE = """
-[Unit]
-Description=Cloudflare Dynamic DNS
-After=network.target
-StartLimitIntervalSec=0
-
-[Service]
-Type=simple
-Restart=always
-RestartSec={restart_sec}
-User=root
-ExecStart={python} -m cfddns -n {name} -z {zone_id} -t {token} -m {method} update
-
-[Install]
-WantedBy=multi-user.target
-"""
 
 ##################################
 # Record management
@@ -107,6 +91,7 @@ def update_records(args):
             name = cf_opt['domain']
             print(f'  {ip}')
             cf.create_record(type, name, ip)
+        print()
         
         if not args.daemon:
             break
@@ -205,6 +190,121 @@ def show_rule_funcs(args):
 # Service management
 ##################################
 
+def __check_systemd():
+    # is Linux
+    if sys.platform != 'linux':
+        raise NotImplementedError("systemd is only available on Linux")
+
+    if not os.path.exists("/bin/systemctl"):
+        raise NotImplementedError("systemd is not available on this system")
+
+def __check_privilege():
+    if os.geteuid() != 0:
+        raise PermissionError("You need root privilege to install/uninstall systemd service")
+
+def list_services(args):
+    __check_systemd()
+
+    location = "/etc/systemd/system"
+    services = os.listdir(location)
+    services = [s for s in services if s.startswith('cfddns-') and s.endswith(".service")]
+    print(f'Find {len(services)} services:')
+    for s in services:
+        print(f'  {s}')
+
+
+def compose_svc_name(input):
+    name = input
+    if not name.startswith('cfddns-'):
+        name = 'cfddns-' + name
+    if not name.endswith('.service'):
+        name += '.service'
+    return name
+
+
+def uninstall(args):
+    __check_systemd()
+    __check_privilege()
+
+    location = "/etc/systemd/system"
+    name = compose_svc_name(args.name)
+    path = os.path.join(location, name)
+
+    if not os.path.exists(path):
+        print(f"Service {name} not found")
+        return
+    
+    print(f"Service {name} at {path} will be removed, sure?")
+    if not args.yes:
+        confirm = input("[N/y]: ")
+        if confirm != 'y':
+            print('Abort')
+            return
+    
+    os.system(f"systemctl stop {name}")
+    os.system(f"systemctl disable {name}")
+    os.remove(path)
+
+
+SERVICE_TEMPLATE = """
+[Unit]
+Description=Cloudflare Dynamic DNS
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONUNBUFFERED=1"
+ExecStart={python} -m cfddns record update -d {domain} -z {zone} -t {token} --ttl {ttl} --daemon --interval {interval} -r {rules}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def install(args):
+    __check_systemd()
+    __check_privilege()
+
+    cf_opt = __cf_options(args)
+    rules = parse_rules(args)   # parse to check the syntax
+    
+    location = "/etc/systemd/system"
+    name = compose_svc_name(args.name)
+    path = os.path.join(location, name)
+
+    if os.path.exists(path):
+        raise FileExistsError(f"Service {name} already exists")
+    
+    service_str = SERVICE_TEMPLATE.format(
+        python=args.python,
+        domain=cf_opt['domain'], zone=cf_opt['zone'], token=cf_opt['token'],
+        ttl=args.ttl, interval=args.interval, 
+        rules=' '.join([f'"{e}"' for e in args.rules])
+    )
+    
+    print(f"Install to {path}")
+    if input("[N/y]: ") != 'y':
+        print('Abort')
+        return
+    
+    with open(path, 'w') as f:
+        f.write(service_str)
+
+    import stat
+    os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+
+    print("Run the following commands to enable and start the service:")
+    print(f"  systemctl enable {name}")
+    print(f"  systemctl start {name}")
+    print()
+    print(f"Run the following commands to check the service log:")
+    print(f"  journalctl -r -u {name}")
 
 
 def main():
@@ -225,6 +325,7 @@ def main():
     clear.set_defaults(handler=clear_records)
 
     def add_cf_opt_group(parser):
+        # Note that 'cfddns service install' share this group
         cfopt = parser.add_argument_group("Cloudflare options")
         cfopt.add_argument('-d', '--domain', help="Domain name")
         cfopt.add_argument('-z', '--zone', help="Zone ID")
@@ -241,7 +342,7 @@ def main():
     daemon_opt.add_argument('--interval', help="Update interval, in seconds", type=int, default=60)
     update.add_argument(
         '-r', '--rules', 
-        help="IP selection rules. See `cfddns addr -h` for the rule syntax", 
+        help="IP selection rules. See `cfddns addr list -h` for the rule syntax", 
         nargs=argparse.REMAINDER, required=True
     )
 
@@ -265,10 +366,10 @@ rule syntax:
 
   examples:
     select all global IP addresses:
-      cfddns addr -r -s all_ip -f is_global
+      cfddns addr list -r -s all_ip -f is_global
 
     select IPv6 address that has connection to the internet:
-      cfddns addr -r -s all_ipv6 -f conn_to_inet
+      cfddns addr list -r -s all_ipv6 -f conn_to_inet
 """,
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -283,19 +384,38 @@ rule syntax:
 
     ## Service parser
     service_parser = sub_parsers.add_parser("service", help="Systemd service management")
+    service_parser.set_defaults(handler=lambda x: service_parser.print_help())
+
     svc_acts = service_parser.add_subparsers(dest="action", required=True)
     list_svc = svc_acts.add_parser("list", help="List all services")
     install_svc = svc_acts.add_parser("install", help="Install a service")
     uninstall_svc = svc_acts.add_parser("uninstall", help="Uninstall a service")
 
+    list_svc.set_defaults(handler=list_services)
+
     install_svc.add_argument('-n', '--name', help="Service name", required=True)
     install_svc.add_argument(
-        '-i', '--interval', help="Update interval, in seconds, default 60s", 
+        '--interval', help="Update interval, in seconds, default 60s", 
         type=int, default=60
     )
-    install_svc.add_argument('--python', help="Python executable path", default="python3")
+    install_svc.add_argument('-p', '--python', help="Python executable path", default=sys.executable)
+    add_cf_opt_group(install_svc)
+    install_svc.add_argument(
+        '-r', '--rules',
+        required=True, nargs=argparse.REMAINDER,
+        help="IP selection rules. See `cfddns addr list -h` for the rule syntax",
+    )
+    install_svc.set_defaults(handler=install)
 
     uninstall_svc.add_argument('-n', '--name', help="Service name", required=True)
+    uninstall_svc.add_argument('-y', '--yes', help="Skip confirmation", action="store_true")
+    uninstall_svc.set_defaults(handler=uninstall)
     
+    ## Execute
     args = parser.parse_args()
-    args.handler(args)
+
+    try:
+        args.handler(args)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)

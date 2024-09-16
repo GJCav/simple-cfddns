@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: Internet :: Name Service (DNS)"
 ]
 dependencies = [
-    "requests",
+    "requests", "psutil"
 ]
 
 [project.urls]
