@@ -330,7 +330,10 @@ def main():
         cfopt.add_argument('-d', '--domain', help="Domain name")
         cfopt.add_argument('-z', '--zone', help="Zone ID")
         cfopt.add_argument('-t', '--token', help="API Token")
-        cfopt.add_argument('-c', '--config-file', help="Config file path")
+        cfopt.add_argument(
+            '-c', '--config-file', 
+            help="Config file path. If provided, the options are loaded from this file, " 
+               + "overrided by command line options, and saved back to this file.")
         cfopt.add_argument('-i', '--interactive', help="Interactive mode", action="store_true")
         cfopt.add_argument('--ttl', help="DNS record TTL", type=int, default=60)
     add_cf_opt_group(list)
