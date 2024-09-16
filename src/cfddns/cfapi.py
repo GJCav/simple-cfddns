@@ -106,13 +106,3 @@ class CloudflareAPI:
         if json.get("success", True) == False:
             raise Exception(f"CF_API: delete_record API error, errors: {str(json['errors'])}")
         return json["result"]
-
-    def smart_update(self, name, ipaddr):
-        type = "A" if '.' in ipaddr else "AAAA"
-        records = self.list_records(name, type)
-        if len(records) == 0:
-            self.create_record(type, name, ipaddr)
-        else:
-            record = records[0]
-            rid = record["id"]
-            self.update_record(rid, type, name, ipaddr)

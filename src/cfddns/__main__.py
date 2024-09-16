@@ -1,4 +1,4 @@
-from .cli import CFDDNS
+from . import main
 
 if __name__ == "__main__":
-    CFDDNS().execute()
+    main()

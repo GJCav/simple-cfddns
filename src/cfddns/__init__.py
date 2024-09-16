@@ -1,4 +1,4 @@
 
 def main():
-    from .cli import CFDDNS
-    CFDDNS().execute()
+    from .cli import main
+    main()

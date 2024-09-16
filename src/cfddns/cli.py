@@ -1,8 +1,12 @@
 import argparse
 from . import iptools
 from .cfapi import CloudflareAPI
+import json
 import os
-import sys
+import os.path
+import re as regex
+import time
+import datetime
 
 SERVICE_TEMPLATE = """
 [Unit]
@@ -21,286 +25,277 @@ ExecStart={python} -m cfddns -n {name} -z {zone_id} -t {token} -m {method} updat
 WantedBy=multi-user.target
 """
 
+##################################
+# Record management
+##################################
 
-class CFDDNS:
-    def __init__(self) -> None:
-        pass
+def load_cf_option(args):
+    options = {}
+    if args.config_file:
+        try:
+            with open(args.config_file, 'r') as f:
+                options = json.load(f)
+        except:
+            pass
+    if args.domain:
+        options['domain'] = args.domain
+    if args.zone:
+        options['zone'] = args.zone
+    if args.token:
+        options['token'] = args.token
+    return options
 
-    def execute(self):
-        parser = argparse.ArgumentParser()
-        parser.add_argument( '-n', "--name", help="domain name")
-        parser.add_argument('-z', "--zone", help="zone id for your domain")
-        parser.add_argument('-t', "--token", help="api token, refer to " +
-                            "https://developers.cloudflare.com/fundamentals/api/get-started/")
-        parser.add_argument("--ttl", help="ttl", default=60)
-        parser.add_argument("-m", "--method", help="method to get ip address, select from iptools.py", 
-                            default="get_all_inet_ip")
 
-        action_parser = parser.add_subparsers(title="action", dest="action", required=True)
+def check_cf_option(opt, interactive=True):
+    required = ['domain', 'zone', 'token']
+    for r in required:
+        if r not in opt:
+            if interactive:
+                opt[r] = input(f"{r}: ")
+            else:
+                return None
+    return opt
 
-        # update, delete, list
-        action_parser.add_parser("update", help="update record")
-        del_parser = action_parser.add_parser("delete", help="delete record")
-        del_parser.add_argument("-y", "--yes", help="skip confirmation", action="store_true")
-        action_parser.add_parser("list", help="list records")
 
-        # install
-        install_parser = action_parser.add_parser("install", help="install as a service")
-        install_parser.add_argument("service_name", help="service name")
-        install_parser.add_argument("-s", "--restart-sec", help="restart interval in seconds", default=60, type=int)
-        install_parser.add_argument("-y", "--yes", help="skip confirmation", action="store_true")
-        install_parser.add_argument("--python", help="python interpreter path", default=sys.executable)
+def __cf_options(args):
+    cf_opt = load_cf_option(args)
+    cf_opt = check_cf_option(cf_opt, args.interactive)
+    if cf_opt is None:
+        raise ValueError("Missing Cloudflare options")
+    if args.config_file:
+        with open(args.config_file, 'w') as f:
+            json.dump(cf_opt, f, indent=2, ensure_ascii=False)
+    return cf_opt
 
-        # uninstall
-        uninstall_parser = action_parser.add_parser("uninstall", help="uninstall service")
-        uninstall_parser.add_argument("service_name", help="service name")
-        uninstall_parser.add_argument("-y", "--yes", help="skip confirmation", action="store_true")
 
-        # all services
-        services_parser = action_parser.add_parser("services", help="list all services")
+def list_records(args):
+    cf_opt = __cf_options(args)
+    cf = CloudflareAPI(cf_opt['zone'], cf_opt['token'], ttl=args.ttl)
+    records = cf.list_records(cf_opt['domain'])
+    records += cf.list_records(cf_opt['domain'], type="AAAA")
+
+    print(f'IP addresses of {cf_opt["domain"]}:')
+    for r in records:
+        print(f"{r['content']}")
+
+
+def clear_records(args):
+    cf_opt = __cf_options(args)
+    cf = CloudflareAPI(cf_opt['zone'], cf_opt['token'], ttl=args.ttl)
+    records = cf.list_records(cf_opt['domain'])
+    records += cf.list_records(cf_opt['domain'], type="AAAA")
+
+    print(f'Delete {len(records)} records of {cf_opt["domain"]}:')
+    for r in records:
+        print(f'  {r["content"]}')
+        cf.delete_record(r['id'])
+
+
+def update_records(args):
+    cf_opt = __cf_options(args)
+    cf = CloudflareAPI(cf_opt['zone'], cf_opt['token'], ttl=args.ttl)
+
+    while True:
+        print(f'Update {cf_opt["domain"]} records at {datetime.datetime.now()}')
+
+        ip_list = iptools.select(parse_rules(args))
+        clear_records(args)
+
+        print(f'Create {len(ip_list)} records for {cf_opt["domain"]}:')
+        for ip in ip_list:
+            type = 'A' if '.' in ip else 'AAAA'
+            name = cf_opt['domain']
+            print(f'  {ip}')
+            cf.create_record(type, name, ip)
         
-        # addr
-        addr_parser = action_parser.add_parser("addr", help="show the ip address that will be used to update record")
+        if not args.daemon:
+            break
+        time.sleep(args.interval)
+
+
+###########################
+# addr testing
+###########################
+def parse_rules(args):
+    rule_desc = args.rules
+    rule_desc = [rule_desc[i:i+2] for i in range(0, len(rule_desc), 2)]
+
+    rules = []
+    canonical_types = {
+        '-s': 'source', '--select': 'source',
+        '-f': 'filter', '--filter': 'filter',
+        '-i': 'ifilter', '--inv-filter': 'ifilter'
+    }
+
+    for desc in rule_desc:
+        if len(desc) != 2:
+            raise ValueError(f"Invalid rule: {desc}")
+        type, fn_args = desc
+        canonical_type = canonical_types.get(type)
+        if not canonical_type:
+            raise ValueError(f"Invalid rule type '{type}' near {desc}")
         
-        args = parser.parse_args()
-        self.args = args
+        fn_args = fn_args.split(',')
+        fn = fn_args[0]
+        args = fn_args[1:]
 
-        if args.action == "list":
-            self.list()
-        elif args.action == "update":
-            self.update()
-        elif args.action == "delete":
-            self.delete()
-        elif args.action == "install":
-            self.install()
-        elif args.action == "uninstall":
-            self.uninstall()
-        elif args.action == "services":
-            self.services()
-        elif args.action == "addr":
-            self.addr()
+        if canonical_type in ['filter', 'ifilter']:
+            if fn not in iptools.FILTERS:
+                raise ValueError(f"Unknown filter function '{fn}' near {desc}")
 
-    def _check_api_args(self):
-        args = self.args
-        self.token = args.token or input("Token: ")
-        self.zone_id = args.zone or input("Zone ID: ")
-        self.name = args.name or input("Domain name: ")
+            rules.append({
+                'type': canonical_type,
+                'name': fn,
+            })
+        elif canonical_type == 'source':
+            if fn not in iptools.SOURCES:
+                raise ValueError(f"Unknown select function '{fn}' near {desc}")
 
-        if self.token is None:
-            print("-t or --token is required")
-            sys.exit(1)
-        if self.zone_id is None:
-            print("-z or --zone is required")
-            sys.exit(1)
-        if self.name is None:
-            print("-n or --name is required")
-            sys.exit(1)
+            rules.append({
+                'type': canonical_type,
+                'name': fn,
+                'args': args
+            })
 
-    
-    def list(self):
-        self._check_api_args()
+    return rules
 
-        api = CloudflareAPI(self.zone_id, self.token)
-        records = api.list_records(self.name, "A")
-        records += api.list_records(self.name, "AAAA")
-        print(f"Found {len(records)} records:")
-        for record in records:
-            print(f"{record['name']} -> {record['content']}")
-        
-    
-    def update(self):
-        self._check_api_args()
+def addr_testing(args):
+    rules = parse_rules(args)
+    ip_list = iptools.select(rules)
+    for ip in ip_list:
+        print(ip)
 
-        api = CloudflareAPI(self.zone_id, self.token, self.args.ttl)
+def print_funcs(funcs):
+    indent = 2
+    gap = 2
+    max_width = 80
 
-        method = getattr(iptools, self.args.method, None)
-        if method is None:
-            print(f"Method {self.args.method} not found")
-            sys.exit(1)
+    name_len = max([len(k) for k in funcs.keys()])
+    doc_width = max_width - name_len - gap
+    doc_indent = ' ' * (name_len + gap + indent)
 
-        addrs = method()
-        if isinstance(addrs, str):
-            addrs = [addrs]
+    for k, fn in funcs.items():
+        doc = fn.__doc__.strip()
+        doc = doc.replace('\n', ' ')
+        doc = regex.sub(r'\s+', ' ', doc)
 
-        if len(addrs) == 0:
-            print("No ip address found")
-            sys.exit(0)
-    
-        for addr in addrs:
-            print(f"Updating record {self.name} -> {addr}")
-            try:
-                api.smart_update(self.name, addr)
-            except Exception as e:
-                print(f"error: {e}")
+        print(' ' * indent, end='')
+        print(k, end='')
+        print(' ' * (name_len - len(k)), end='')
+        print(' ' * gap, end='')
+        print(doc[:doc_width])
+
+        doc = doc[doc_width:]
+        while doc:
+            print(' ' * len(doc_indent), end='')
+            print(doc[:doc_width])
+            doc = doc[doc_width:]
 
 
-    def delete(self):
-        """
-        list all records with name and delete them
-        """
-        self._check_api_args()
+def show_rule_funcs(args):
+    print('FUNC for SELECT rules: ')
+    print_funcs(iptools.SOURCES)
 
-        api = CloudflareAPI(self.zone_id, self.token)
-        records = api.list_records(self.name, "A")
-        records += api.list_records(self.name, "AAAA")
-
-        if len(records) == 0:
-            print("No records to delete")
-            sys.exit(0)
-
-        print("The following records will be deleted:")
-        for record in records:
-            print(f"  {record['name']} -> {record['content']}")
-
-        if not self.args.yes:
-            if input("Are you sure? [y/N] ").lower() != "y":
-                print("Aborted")
-                sys.exit(0)
-
-        for record in records:
-            print(f"Deleting record {record['name']} -> {record['content']}")
-            try:
-                api.delete_record(record['id'])
-            except Exception as e:
-                print(f"error: {e}")
-
-    def _compose_name(self, input_name):
-        service_name = input_name
-        if not service_name.startswith("cfddns-"):
-            service_name = "cfddns-" + service_name
-        if not service_name.endswith(".service"):
-            service_name += ".service"
-        return service_name
-
-    
-    def _check_systemd(self):
-        # check if systemd is available
-        if not os.path.exists("/bin/systemctl"):
-            print("systemd is not available on this system")
-            sys.exit(1)
-    
-    def _check_root(self):
-        # check if in sudo mode
-        if os.getuid() != 0:
-            print("Please run this script as root")
-            sys.exit(1)
+    print()
+    print('FUNC for FILTER rules: ')
+    print_funcs(iptools.FILTERS)
 
 
-    def install(self):
-        """
-        install this program as a service.
-        only support systemd for now.
-        """
-        self._check_api_args()
-        self._check_systemd()
-        self._check_root()
+##################################
+# Service management
+##################################
 
-        location = "/etc/systemd/system"
-        service_name = self._compose_name(self.args.service_name)
-        service_path = os.path.join(location, service_name)
 
-        # check if service file exists
-        if os.path.exists(service_path):
-            print("Service file already exists")
-            sys.exit(1)
-
-        restart_sec = self.args.restart_sec
-        python = self.args.python
-        method = self.args.method
-
-        # confirm
-        print(f"Service name: {service_name}")
-        print(f"Service file will be created at: {service_path}")
-        print(f"Restart interval: {restart_sec} seconds")
-        print(f"Python interpreter: {python}")
-        print(f"Method to get ip address: {method}")
-
-        service_str = SERVICE_TEMPLATE.format(
-            restart_sec=restart_sec,
-            name=self.name,
-            zone_id=self.zone_id,
-            token=self.token,
-            python=python,
-            method=method
-        )
-
-        if not self.args.yes:
-            if input("Are you sure? [y/N] ").lower() != "y":
-                print("Aborted")
-                sys.exit(0)
-        
-        # write service file
-        with open(service_path, "w") as f:
-            f.write(service_str)
-        
-        import stat
-        os.chmod(service_path, stat.S_IWUSR | stat.S_IRUSR)
-        
-    def uninstall(self):
-        """
-        uninstall service
-        """
-        self._check_systemd()
-        self._check_root()
-
-        location = "/etc/systemd/system"
-        service_name = self._compose_name(self.args.service_name)
-        service_path = os.path.join(location, service_name)
-
-        # check if service file exists
-        if not os.path.exists(service_path):
-            print("Service file not found")
-            sys.exit(1)
-
-        # confirm
-        print(f"Service name: {service_name}")
-        print(f"Service file here will be deleted: {service_path}")
-
-        if not self.args.yes:
-            if input("Are you sure? [y/N] ").lower() != "y":
-                print("Aborted")
-                sys.exit(0)
-
-        # stop and disable service
-        os.system(f"systemctl stop {service_name}")
-        os.system(f"systemctl disable {service_name}")
-
-        # delete service file
-        os.remove(service_path)
-
-    def services(self):
-        """
-        list all services
-        """
-        self._check_systemd()
-
-        location = "/etc/systemd/system"
-        services = os.listdir(location)
-        services = [s for s in services if s.startswith("cfddns-") and s.endswith(".service")]
-
-        print(f"Found {len(services)} services:")
-        for service in services:
-            print(f"  {service}")
-    
-    def addr(self):
-        """
-        show the ip address that will be used to update record
-        """
-        method = getattr(iptools, self.args.method, None)
-        if method is None:
-            print(f"Method {self.args.method} not found")
-            sys.exit(1)
-
-        addrs = method()
-        if isinstance(addrs, str):
-            addrs = [addrs]
-
-        if len(addrs) == 0:
-            print("No ip address found")
-            sys.exit(0)
-    
-        for addr in addrs:
-            print(addr)
 
 def main():
-    CFDDNS().execute()
+    parser = argparse.ArgumentParser(prog="cfddns")
+    sub_parsers = parser.add_subparsers(dest="scope", required=True)
+    
+    ## Record parser
+    record_parser = sub_parsers.add_parser("record", help="DNS record name management")
+    record_parser.set_defaults(handler=lambda x: record_parser.print_help())
+
+    actions = record_parser.add_subparsers(dest="action", required=True)
+    list = actions.add_parser("list", help="List all DNS records")
+    update = actions.add_parser("update", help="Update a DNS record")
+    clear = actions.add_parser("clear", help="Clear DNS records to this domain")
+
+    list.set_defaults(handler=list_records)
+    update.set_defaults(handler=update_records)
+    clear.set_defaults(handler=clear_records)
+
+    def add_cf_opt_group(parser):
+        cfopt = parser.add_argument_group("Cloudflare options")
+        cfopt.add_argument('-d', '--domain', help="Domain name")
+        cfopt.add_argument('-z', '--zone', help="Zone ID")
+        cfopt.add_argument('-t', '--token', help="API Token")
+        cfopt.add_argument('-c', '--config-file', help="Config file path")
+        cfopt.add_argument('-i', '--interactive', help="Interactive mode", action="store_true")
+        cfopt.add_argument('--ttl', help="DNS record TTL", type=int, default=60)
+    add_cf_opt_group(list)
+    add_cf_opt_group(update)
+    add_cf_opt_group(clear)
+
+    daemon_opt = update.add_argument_group("Daemon options")
+    daemon_opt.add_argument('--daemon', help="Daemon mode", default=False, action="store_true")
+    daemon_opt.add_argument('--interval', help="Update interval, in seconds", type=int, default=60)
+    update.add_argument(
+        '-r', '--rules', 
+        help="IP selection rules. See `cfddns addr -h` for the rule syntax", 
+        nargs=argparse.REMAINDER, required=True
+    )
+
+    ## Addr parser
+    addr_parser = sub_parsers.add_parser("addr", help="IP address tools")
+    addr_acts = addr_parser.add_subparsers(dest="action", required=True)
+
+    show_funcs = addr_acts.add_parser("show_func", help="Show available FUNCs for rules")
+    show_funcs.set_defaults(handler=show_rule_funcs)
+
+    list_addr = addr_acts.add_parser(
+        "list", help="List IP addresses based on rules",
+        epilog=
+"""
+rule syntax:
+  these options can be applied multiple times, and evaluated in order.
+
+  -s, --select FUNC[,args]     select IP address by FUNC
+  -f, --filter FUNC            filter IP address by FUNC
+  -i, --inv-filter FUNC        filter IP address by FUNC, but keep the inverse result
+
+  examples:
+    select all global IP addresses:
+      cfddns addr -r -s all_ip -f is_global
+
+    select IPv6 address that has connection to the internet:
+      cfddns addr -r -s all_ipv6 -f conn_to_inet
+""",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    list_addr.add_argument(
+        '-r', '--rules', 
+        help="IP selection rules", nargs=argparse.REMAINDER,
+        required=True
+    )
+    list_addr.set_defaults(handler=addr_testing)
+
+
+    ## Service parser
+    service_parser = sub_parsers.add_parser("service", help="Systemd service management")
+    svc_acts = service_parser.add_subparsers(dest="action", required=True)
+    list_svc = svc_acts.add_parser("list", help="List all services")
+    install_svc = svc_acts.add_parser("install", help="Install a service")
+    uninstall_svc = svc_acts.add_parser("uninstall", help="Uninstall a service")
+
+    install_svc.add_argument('-n', '--name', help="Service name", required=True)
+    install_svc.add_argument(
+        '-i', '--interval', help="Update interval, in seconds, default 60s", 
+        type=int, default=60
+    )
+    install_svc.add_argument('--python', help="Python executable path", default="python3")
+
+    uninstall_svc.add_argument('-n', '--name', help="Service name", required=True)
+    
+    args = parser.parse_args()
+    args.handler(args)
