@@ -312,7 +312,7 @@ def main():
     sub_parsers = parser.add_subparsers(dest="scope", required=True)
     
     ## Record parser
-    record_parser = sub_parsers.add_parser("record", help="DNS record name management")
+    record_parser = sub_parsers.add_parser("record", help="DNS record management")
     record_parser.set_defaults(handler=lambda x: record_parser.print_help())
 
     actions = record_parser.add_subparsers(dest="action", required=True)
@@ -333,8 +333,10 @@ def main():
         cfopt.add_argument(
             '-c', '--config-file', 
             help="Config file path. If provided, the options are loaded from this file, " 
-               + "overrided by command line options, and saved back to this file.")
-        cfopt.add_argument('-i', '--interactive', help="Interactive mode", action="store_true")
+               + "overridden by command line options, and saved back to this file.")
+        cfopt.add_argument(
+            '-i', '--interactive', action="store_true",
+            help="Interactive mode. If provided, the program will ask for missing options.")
         cfopt.add_argument('--ttl', help="DNS record TTL", type=int, default=60)
     add_cf_opt_group(list)
     add_cf_opt_group(update)
